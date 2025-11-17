@@ -1,0 +1,86 @@
+# This is an example workflow showing how to use the reusable workflows
+# Copy this to your project's .github/workflows/ directory and customize
+
+name: Example iOS CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  # Example 1: Basic build
+  build-debug:
+    name: Build Debug
+    uses: ./.github/workflows/xcode-build.yml
+    with:
+      workspace: 'MyApp.xcworkspace'  # Change to your workspace
+      scheme: 'MyApp'                  # Change to your scheme
+      configuration: 'Debug'
+      sdk: 'iphonesimulator'
+      destination: 'platform=iOS Simulator,name=iPhone 15,OS=latest'
+      runs-on: 'macos-14'
+      clean-build: false
+
+  # Example 2: Run tests with coverage
+  test:
+    name: Run Tests
+    uses: ./.github/workflows/xcode-test.yml
+    with:
+      workspace: 'MyApp.xcworkspace'
+      scheme: 'MyApp'
+      configuration: 'Debug'
+      enable-code-coverage: true
+      parallel-testing: true
+      runs-on: 'macos-14'
+
+  # Example 3: Release build with code signing
+  build-release:
+    name: Build Release
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/xcode-build.yml
+    with:
+      workspace: 'MyApp.xcworkspace'
+      scheme: 'MyApp'
+      configuration: 'Release'
+      sdk: 'iphoneos'
+      destination: 'generic/platform=iOS'
+      code-sign: true
+      runs-on: 'macos-14'
+    secrets:
+      CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE }}
+      CERTIFICATE_PASSWORD: ${{ secrets.CERT_PASSWORD }}
+      PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISION_PROFILE }}
+      KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+
+  # Example 4: Using self-hosted runner
+  build-self-hosted:
+    name: Build on Self-Hosted Runner
+    if: github.event_name == 'push'
+    uses: ./.github/workflows/xcode-build.yml
+    with:
+      workspace: 'MyApp.xcworkspace'
+      scheme: 'MyApp'
+      configuration: 'Debug'
+      # Use self-hosted runner with specific labels
+      runs-on: '["self-hosted", "macOS", "ARM64"]'
+
+  # Example 5: Matrix testing across multiple devices
+  test-matrix:
+    name: Test on ${{ matrix.device }}
+    strategy:
+      matrix:
+        include:
+          - device: 'iPhone 15'
+            destination: 'platform=iOS Simulator,name=iPhone 15,OS=latest'
+          - device: 'iPhone 15 Pro Max'
+            destination: 'platform=iOS Simulator,name=iPhone 15 Pro Max,OS=latest'
+          - device: 'iPad Pro'
+            destination: 'platform=iOS Simulator,name=iPad Pro (12.9-inch) (6th generation),OS=latest'
+    uses: ./.github/workflows/xcode-test.yml
+    with:
+      workspace: 'MyApp.xcworkspace'
+      scheme: 'MyApp'
+      destination: ${{ matrix.destination }}
+      enable-code-coverage: true

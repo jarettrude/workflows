@@ -1,0 +1,319 @@
+name: Reusable Xcode Test
+
+on:
+  workflow_call:
+    inputs:
+      # Project/Workspace Configuration
+      workspace:
+        description: 'Path to .xcworkspace file (relative to repo root)'
+        required: false
+        type: string
+      project:
+        description: 'Path to .xcodeproj file (relative to repo root). Use workspace OR project, not both.'
+        required: false
+        type: string
+      scheme:
+        description: 'Xcode scheme to test'
+        required: true
+        type: string
+
+      # Test Configuration
+      configuration:
+        description: 'Build configuration (Debug or Release)'
+        required: false
+        type: string
+        default: 'Debug'
+      sdk:
+        description: 'SDK to test against (e.g., iphoneos, iphonesimulator, macosx)'
+        required: false
+        type: string
+        default: 'iphonesimulator'
+      destination:
+        description: 'Test destination (e.g., "platform=iOS Simulator,name=iPhone 15,OS=latest")'
+        required: false
+        type: string
+        default: 'platform=iOS Simulator,name=iPhone 15,OS=latest'
+
+      # Xcode Version
+      xcode-version:
+        description: 'Xcode version to use (e.g., "15.0", "latest-stable"). Only applies to GitHub-hosted runners.'
+        required: false
+        type: string
+        default: 'latest-stable'
+
+      # Runner Configuration
+      runs-on:
+        description: 'Runner to use (e.g., "macos-13", "macos-14", "self-hosted", or JSON array like ["self-hosted", "macOS"])'
+        required: false
+        type: string
+        default: 'macos-14'
+
+      # Test Options
+      test-plan:
+        description: 'Specific test plan to run'
+        required: false
+        type: string
+      only-testing:
+        description: 'Run only specific tests (comma-separated, e.g., "MyAppTests/MyTestClass/testExample")'
+        required: false
+        type: string
+      skip-testing:
+        description: 'Skip specific tests (comma-separated)'
+        required: false
+        type: string
+      enable-code-coverage:
+        description: 'Enable code coverage collection'
+        required: false
+        type: boolean
+        default: true
+      parallel-testing:
+        description: 'Enable parallel testing'
+        required: false
+        type: boolean
+        default: true
+      retry-tests-on-failure:
+        description: 'Retry failed tests'
+        required: false
+        type: boolean
+        default: false
+
+      # Build Options
+      clean-build:
+        description: 'Whether to clean before building'
+        required: false
+        type: boolean
+        default: false
+
+      # Additional Options
+      derived-data-path:
+        description: 'Custom derived data path'
+        required: false
+        type: string
+      result-bundle-path:
+        description: 'Path to save test result bundle'
+        required: false
+        type: string
+        default: 'TestResults.xcresult'
+      extra-test-args:
+        description: 'Additional xcodebuild test arguments (space-separated)'
+        required: false
+        type: string
+
+      # Working Directory
+      working-directory:
+        description: 'Working directory for test commands'
+        required: false
+        type: string
+        default: '.'
+
+    secrets:
+      # Any secrets needed for tests (API keys, etc.)
+      TEST_API_KEY:
+        description: 'API key for tests'
+        required: false
+
+    outputs:
+      test-status:
+        description: 'Test status (success or failure)'
+        value: ${{ jobs.test.outputs.status }}
+      test-results:
+        description: 'Path to test results artifact'
+        value: 'test-results'
+      coverage-report:
+        description: 'Path to coverage report artifact'
+        value: 'coverage-report'
+
+jobs:
+  test:
+    runs-on: ${{ fromJSON(inputs.runs-on) || inputs.runs-on }}
+    outputs:
+      status: ${{ steps.test.outcome }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Only select Xcode version on GitHub-hosted runners
+      - name: Select Xcode version
+        if: ${{ !contains(inputs.runs-on, 'self-hosted') }}
+        run: |
+          if [ "${{ inputs.xcode-version }}" = "latest-stable" ]; then
+            sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          else
+            sudo xcode-select -s /Applications/Xcode_${{ inputs.xcode-version }}.app/Contents/Developer
+          fi
+          xcodebuild -version
+
+      # For self-hosted runners, just show current Xcode version
+      - name: Show Xcode version
+        if: ${{ contains(inputs.runs-on, 'self-hosted') }}
+        run: xcodebuild -version
+
+      # Install dependencies (CocoaPods)
+      - name: Install CocoaPods dependencies
+        if: hashFiles('**/Podfile') != ''
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if [ -f "Podfile" ]; then
+            pod install
+          fi
+
+      # Install dependencies (Swift Package Manager) - resolve packages
+      - name: Resolve Swift Package dependencies
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          PROJECT_OR_WORKSPACE=""
+          if [ -n "${{ inputs.workspace }}" ]; then
+            PROJECT_OR_WORKSPACE="-workspace ${{ inputs.workspace }}"
+          elif [ -n "${{ inputs.project }}" ]; then
+            PROJECT_OR_WORKSPACE="-project ${{ inputs.project }}"
+          fi
+
+          if [ -n "$PROJECT_OR_WORKSPACE" ]; then
+            xcodebuild $PROJECT_OR_WORKSPACE \
+              -scheme "${{ inputs.scheme }}" \
+              -resolvePackageDependencies
+          fi
+
+      # Run tests
+      - name: Run tests
+        id: test
+        working-directory: ${{ inputs.working-directory }}
+        env:
+          TEST_API_KEY: ${{ secrets.TEST_API_KEY }}
+        run: |
+          # Determine project or workspace
+          PROJECT_OR_WORKSPACE=""
+          if [ -n "${{ inputs.workspace }}" ]; then
+            PROJECT_OR_WORKSPACE="-workspace ${{ inputs.workspace }}"
+          elif [ -n "${{ inputs.project }}" ]; then
+            PROJECT_OR_WORKSPACE="-project ${{ inputs.project }}"
+          fi
+
+          # Test command
+          TEST_CMD="xcodebuild"
+
+          # Add project/workspace
+          TEST_CMD="$TEST_CMD $PROJECT_OR_WORKSPACE"
+
+          # Add scheme
+          TEST_CMD="$TEST_CMD -scheme ${{ inputs.scheme }}"
+
+          # Add configuration
+          TEST_CMD="$TEST_CMD -configuration ${{ inputs.configuration }}"
+
+          # Add SDK
+          TEST_CMD="$TEST_CMD -sdk ${{ inputs.sdk }}"
+
+          # Add destination
+          TEST_CMD="$TEST_CMD -destination \"${{ inputs.destination }}\""
+
+          # Add test plan if specified
+          if [ -n "${{ inputs.test-plan }}" ]; then
+            TEST_CMD="$TEST_CMD -testPlan ${{ inputs.test-plan }}"
+          fi
+
+          # Add derived data path if specified
+          if [ -n "${{ inputs.derived-data-path }}" ]; then
+            TEST_CMD="$TEST_CMD -derivedDataPath ${{ inputs.derived-data-path }}"
+          fi
+
+          # Add result bundle path
+          TEST_CMD="$TEST_CMD -resultBundlePath ${{ inputs.result-bundle-path }}"
+
+          # Clean build option
+          if [ "${{ inputs.clean-build }}" = "true" ]; then
+            TEST_CMD="$TEST_CMD clean"
+          fi
+
+          # Test action
+          TEST_CMD="$TEST_CMD test"
+
+          # Only testing specific tests
+          if [ -n "${{ inputs.only-testing }}" ]; then
+            IFS=',' read -ra TESTS <<< "${{ inputs.only-testing }}"
+            for test in "${TESTS[@]}"; do
+              TEST_CMD="$TEST_CMD -only-testing:$test"
+            done
+          fi
+
+          # Skip specific tests
+          if [ -n "${{ inputs.skip-testing }}" ]; then
+            IFS=',' read -ra TESTS <<< "${{ inputs.skip-testing }}"
+            for test in "${TESTS[@]}"; do
+              TEST_CMD="$TEST_CMD -skip-testing:$test"
+            done
+          fi
+
+          # Code coverage
+          if [ "${{ inputs.enable-code-coverage }}" = "true" ]; then
+            TEST_CMD="$TEST_CMD -enableCodeCoverage YES"
+          fi
+
+          # Parallel testing
+          if [ "${{ inputs.parallel-testing }}" = "true" ]; then
+            TEST_CMD="$TEST_CMD -parallel-testing-enabled YES"
+          else
+            TEST_CMD="$TEST_CMD -parallel-testing-enabled NO"
+          fi
+
+          # Retry failed tests
+          if [ "${{ inputs.retry-tests-on-failure }}" = "true" ]; then
+            TEST_CMD="$TEST_CMD -retry-tests-on-failure"
+          fi
+
+          # Code signing (not required for tests)
+          TEST_CMD="$TEST_CMD CODE_SIGN_IDENTITY=\"\" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO"
+
+          # Add extra test args
+          if [ -n "${{ inputs.extra-test-args }}" ]; then
+            TEST_CMD="$TEST_CMD ${{ inputs.extra-test-args }}"
+          fi
+
+          # Execute tests
+          echo "Executing: $TEST_CMD"
+          eval $TEST_CMD | tee test.log
+
+      # Upload test results
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            ${{ inputs.working-directory }}/${{ inputs.result-bundle-path }}
+            ${{ inputs.working-directory }}/test.log
+          if-no-files-found: ignore
+
+      # Generate and upload coverage report
+      - name: Generate coverage report
+        if: always() && inputs.enable-code-coverage
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          # Convert xcresult to coverage report
+          xcrun xccov view --report --json ${{ inputs.result-bundle-path }} > coverage.json
+          xcrun xccov view --report ${{ inputs.result-bundle-path }} > coverage.txt
+
+      - name: Upload coverage report
+        if: always() && inputs.enable-code-coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            ${{ inputs.working-directory }}/coverage.json
+            ${{ inputs.working-directory }}/coverage.txt
+          if-no-files-found: ignore
+
+      # Parse and display test summary
+      - name: Display test summary
+        if: always()
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if [ -d "${{ inputs.result-bundle-path }}" ]; then
+            echo "### Test Summary"
+            xcrun xcresulttool get --format json --path ${{ inputs.result-bundle-path }} | \
+              jq -r '.actions._values[] | select(.actionResult.testsRef != null) | .actionResult.testsRef.id._value' | \
+              while read -r testsRefId; do
+                xcrun xcresulttool get --format json --path ${{ inputs.result-bundle-path }} --id "$testsRefId"
+              done || echo "Unable to parse test results"
+          fi

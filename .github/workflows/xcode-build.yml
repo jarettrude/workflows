@@ -1,0 +1,271 @@
+name: Reusable Xcode Build
+
+on:
+  workflow_call:
+    inputs:
+      # Project/Workspace Configuration
+      workspace:
+        description: 'Path to .xcworkspace file (relative to repo root)'
+        required: false
+        type: string
+      project:
+        description: 'Path to .xcodeproj file (relative to repo root). Use workspace OR project, not both.'
+        required: false
+        type: string
+      scheme:
+        description: 'Xcode scheme to build'
+        required: true
+        type: string
+
+      # Build Configuration
+      configuration:
+        description: 'Build configuration (Debug or Release)'
+        required: false
+        type: string
+        default: 'Debug'
+      sdk:
+        description: 'SDK to build against (e.g., iphoneos, iphonesimulator, macosx)'
+        required: false
+        type: string
+        default: 'iphonesimulator'
+      destination:
+        description: 'Build destination (e.g., "platform=iOS Simulator,name=iPhone 15,OS=latest")'
+        required: false
+        type: string
+        default: 'platform=iOS Simulator,name=iPhone 15,OS=latest'
+
+      # Xcode Version
+      xcode-version:
+        description: 'Xcode version to use (e.g., "15.0", "latest-stable"). Only applies to GitHub-hosted runners.'
+        required: false
+        type: string
+        default: 'latest-stable'
+
+      # Runner Configuration
+      runs-on:
+        description: 'Runner to use (e.g., "macos-13", "macos-14", "self-hosted", or JSON array like ["self-hosted", "macOS"])'
+        required: false
+        type: string
+        default: 'macos-14'
+
+      # Build Options
+      clean-build:
+        description: 'Whether to clean before building'
+        required: false
+        type: boolean
+        default: false
+      build-for-testing:
+        description: 'Build for testing instead of regular build'
+        required: false
+        type: boolean
+        default: false
+
+      # Code Signing
+      code-sign:
+        description: 'Whether to code sign the build'
+        required: false
+        type: boolean
+        default: false
+
+      # Additional Options
+      derived-data-path:
+        description: 'Custom derived data path'
+        required: false
+        type: string
+      extra-build-args:
+        description: 'Additional xcodebuild arguments (space-separated)'
+        required: false
+        type: string
+
+      # Working Directory
+      working-directory:
+        description: 'Working directory for build commands'
+        required: false
+        type: string
+        default: '.'
+
+    secrets:
+      # Code Signing Secrets (optional, only needed if code-sign is true)
+      CERTIFICATE_BASE64:
+        description: 'Base64 encoded signing certificate (.p12)'
+        required: false
+      CERTIFICATE_PASSWORD:
+        description: 'Password for signing certificate'
+        required: false
+      PROVISIONING_PROFILE_BASE64:
+        description: 'Base64 encoded provisioning profile'
+        required: false
+      KEYCHAIN_PASSWORD:
+        description: 'Password for temporary keychain'
+        required: false
+
+    outputs:
+      build-status:
+        description: 'Build status (success or failure)'
+        value: ${{ jobs.build.outputs.status }}
+      build-log:
+        description: 'Path to build log artifact'
+        value: 'build-logs'
+
+jobs:
+  build:
+    runs-on: ${{ fromJSON(inputs.runs-on) || inputs.runs-on }}
+    outputs:
+      status: ${{ steps.build.outcome }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Only select Xcode version on GitHub-hosted runners
+      - name: Select Xcode version
+        if: ${{ !contains(inputs.runs-on, 'self-hosted') }}
+        run: |
+          if [ "${{ inputs.xcode-version }}" = "latest-stable" ]; then
+            sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+          else
+            sudo xcode-select -s /Applications/Xcode_${{ inputs.xcode-version }}.app/Contents/Developer
+          fi
+          xcodebuild -version
+
+      # For self-hosted runners, just show current Xcode version
+      - name: Show Xcode version
+        if: ${{ contains(inputs.runs-on, 'self-hosted') }}
+        run: xcodebuild -version
+
+      # Code Signing Setup (if enabled)
+      - name: Setup code signing
+        if: ${{ inputs.code-sign }}
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.CERTIFICATE_PASSWORD }}
+          PROVISIONING_PROFILE_BASE64: ${{ secrets.PROVISIONING_PROFILE_BASE64 }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          # Create temporary keychain
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+          # Import certificate
+          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+          echo -n "$CERTIFICATE_BASE64" | base64 --decode -o $CERTIFICATE_PATH
+          security import $CERTIFICATE_PATH -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+
+          # Import provisioning profile
+          if [ -n "$PROVISIONING_PROFILE_BASE64" ]; then
+            PROVISION_PATH=$RUNNER_TEMP/build_pp.mobileprovision
+            echo -n "$PROVISIONING_PROFILE_BASE64" | base64 --decode -o $PROVISION_PATH
+            mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+            cp $PROVISION_PATH ~/Library/MobileDevice/Provisioning\ Profiles
+          fi
+
+      # Install dependencies (CocoaPods)
+      - name: Install CocoaPods dependencies
+        if: hashFiles('**/Podfile') != ''
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if [ -f "Podfile" ]; then
+            pod install
+          fi
+
+      # Install dependencies (Swift Package Manager) - resolve packages
+      - name: Resolve Swift Package dependencies
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          PROJECT_OR_WORKSPACE=""
+          if [ -n "${{ inputs.workspace }}" ]; then
+            PROJECT_OR_WORKSPACE="-workspace ${{ inputs.workspace }}"
+          elif [ -n "${{ inputs.project }}" ]; then
+            PROJECT_OR_WORKSPACE="-project ${{ inputs.project }}"
+          fi
+
+          if [ -n "$PROJECT_OR_WORKSPACE" ]; then
+            xcodebuild $PROJECT_OR_WORKSPACE \
+              -scheme "${{ inputs.scheme }}" \
+              -resolvePackageDependencies
+          fi
+
+      # Build
+      - name: Build Xcode project
+        id: build
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          # Determine project or workspace
+          PROJECT_OR_WORKSPACE=""
+          if [ -n "${{ inputs.workspace }}" ]; then
+            PROJECT_OR_WORKSPACE="-workspace ${{ inputs.workspace }}"
+          elif [ -n "${{ inputs.project }}" ]; then
+            PROJECT_OR_WORKSPACE="-project ${{ inputs.project }}"
+          fi
+
+          # Build command
+          BUILD_CMD="xcodebuild"
+
+          # Add project/workspace
+          BUILD_CMD="$BUILD_CMD $PROJECT_OR_WORKSPACE"
+
+          # Add scheme
+          BUILD_CMD="$BUILD_CMD -scheme ${{ inputs.scheme }}"
+
+          # Add configuration
+          BUILD_CMD="$BUILD_CMD -configuration ${{ inputs.configuration }}"
+
+          # Add SDK
+          BUILD_CMD="$BUILD_CMD -sdk ${{ inputs.sdk }}"
+
+          # Add destination
+          BUILD_CMD="$BUILD_CMD -destination \"${{ inputs.destination }}\""
+
+          # Add derived data path if specified
+          if [ -n "${{ inputs.derived-data-path }}" ]; then
+            BUILD_CMD="$BUILD_CMD -derivedDataPath ${{ inputs.derived-data-path }}"
+          fi
+
+          # Clean build option
+          if [ "${{ inputs.clean-build }}" = "true" ]; then
+            BUILD_CMD="$BUILD_CMD clean"
+          fi
+
+          # Build action
+          if [ "${{ inputs.build-for-testing }}" = "true" ]; then
+            BUILD_CMD="$BUILD_CMD build-for-testing"
+          else
+            BUILD_CMD="$BUILD_CMD build"
+          fi
+
+          # Code signing options
+          if [ "${{ inputs.code-sign }}" = "false" ]; then
+            BUILD_CMD="$BUILD_CMD CODE_SIGN_IDENTITY=\"\" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO"
+          fi
+
+          # Add extra build args
+          if [ -n "${{ inputs.extra-build-args }}" ]; then
+            BUILD_CMD="$BUILD_CMD ${{ inputs.extra-build-args }}"
+          fi
+
+          # Execute build
+          echo "Executing: $BUILD_CMD"
+          eval $BUILD_CMD | tee build.log
+
+      # Cleanup code signing (if enabled)
+      - name: Cleanup code signing
+        if: ${{ always() && inputs.code-sign }}
+        run: |
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          if [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain $KEYCHAIN_PATH
+          fi
+          rm -f $RUNNER_TEMP/build_certificate.p12
+          rm -f $RUNNER_TEMP/build_pp.mobileprovision
+
+      # Upload build logs
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: ${{ inputs.working-directory }}/build.log
+          if-no-files-found: ignore
