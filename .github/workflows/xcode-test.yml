@@ -190,8 +190,14 @@ jobs:
             PROJECT_OR_WORKSPACE="-project ${{ inputs.project }}"
           fi
 
-          # Test command
+          # Start test command
           TEST_CMD="xcodebuild"
+
+          # Add actions first (clean test)
+          if [ "${{ inputs.clean-build }}" = "true" ]; then
+            TEST_CMD="$TEST_CMD clean"
+          fi
+          TEST_CMD="$TEST_CMD test"
 
           # Add project/workspace
           TEST_CMD="$TEST_CMD $PROJECT_OR_WORKSPACE"
@@ -221,13 +227,22 @@ jobs:
           # Add result bundle path
           TEST_CMD="$TEST_CMD -resultBundlePath ${{ inputs.result-bundle-path }}"
 
-          # Clean build option
-          if [ "${{ inputs.clean-build }}" = "true" ]; then
-            TEST_CMD="$TEST_CMD clean"
+          # Code coverage (must come before test-specific options)
+          if [ "${{ inputs.enable-code-coverage }}" = "true" ]; then
+            TEST_CMD="$TEST_CMD -enableCodeCoverage YES"
           fi
 
-          # Test action
-          TEST_CMD="$TEST_CMD test"
+          # Parallel testing
+          if [ "${{ inputs.parallel-testing }}" = "true" ]; then
+            TEST_CMD="$TEST_CMD -parallel-testing-enabled YES"
+          else
+            TEST_CMD="$TEST_CMD -parallel-testing-enabled NO"
+          fi
+
+          # Retry failed tests
+          if [ "${{ inputs.retry-tests-on-failure }}" = "true" ]; then
+            TEST_CMD="$TEST_CMD -retry-tests-on-failure"
+          fi
 
           # Only testing specific tests
           if [ -n "${{ inputs.only-testing }}" ]; then
@@ -245,30 +260,13 @@ jobs:
             done
           fi
 
-          # Code coverage
-          if [ "${{ inputs.enable-code-coverage }}" = "true" ]; then
-            TEST_CMD="$TEST_CMD -enableCodeCoverage YES"
-          fi
-
-          # Parallel testing
-          if [ "${{ inputs.parallel-testing }}" = "true" ]; then
-            TEST_CMD="$TEST_CMD -parallel-testing-enabled YES"
-          else
-            TEST_CMD="$TEST_CMD -parallel-testing-enabled NO"
-          fi
-
-          # Retry failed tests
-          if [ "${{ inputs.retry-tests-on-failure }}" = "true" ]; then
-            TEST_CMD="$TEST_CMD -retry-tests-on-failure"
-          fi
-
-          # Code signing (not required for tests)
-          TEST_CMD="$TEST_CMD CODE_SIGN_IDENTITY=\"\" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO"
-
           # Add extra test args
           if [ -n "${{ inputs.extra-test-args }}" ]; then
             TEST_CMD="$TEST_CMD ${{ inputs.extra-test-args }}"
           fi
+
+          # Code signing (build settings must come last)
+          TEST_CMD="$TEST_CMD CODE_SIGN_IDENTITY=\"\" CODE_SIGNING_REQUIRED=NO CODE_SIGNING_ALLOWED=NO"
 
           # Execute tests
           echo "Executing: $TEST_CMD"
